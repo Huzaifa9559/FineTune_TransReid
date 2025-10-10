@@ -4,6 +4,7 @@ from .backbones.resnet import ResNet, Bottleneck
 import copy
 from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_patch16_224_TransReID, deit_small_patch16_224_TransReID
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
+from reid.peft.lora import inject_lora_into_vit, mark_trainable_lora_and_head, maybe_merge_lora
 
 def shuffle_unit(features, shift, group, begin=1):
 
@@ -147,7 +148,7 @@ class build_transformer(nn.Module):
                                                         attn_drop_rate=cfg.MODEL.ATT_DROP_RATE)
         if cfg.MODEL.TRANSFORMER_TYPE == 'deit_small_patch16_224_TransReID':
             self.in_planes = 384
-        if pretrain_choice == 'imagenet':
+        if pretrain_choice == 'imagenet' and model_path:
             self.base.load_param(model_path)
             print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
@@ -201,9 +202,17 @@ class build_transformer(nn.Module):
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)
-        for i in param_dict:
-            self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
-        print('Loading pretrained model from {}'.format(trained_path))
+        
+        # Check if this is a LoRA adapter-only checkpoint
+        if 'adapters' in param_dict:
+            from reid.peft.lora import load_lora_state_dict
+            load_lora_state_dict(self, param_dict['adapters'], strict=False)
+            print(f'Loaded LoRA adapters from {trained_path}')
+        else:
+            # Standard full model checkpoint
+            for i in param_dict:
+                self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
+            print('Loading pretrained model from {}'.format(trained_path))
 
     def load_param_finetune(self, model_path):
         param_dict = torch.load(model_path)
@@ -236,7 +245,7 @@ class build_transformer_local(nn.Module):
 
         self.base = factory[cfg.MODEL.TRANSFORMER_TYPE](img_size=cfg.INPUT.SIZE_TRAIN, sie_xishu=cfg.MODEL.SIE_COE, local_feature=cfg.MODEL.JPM, camera=camera_num, view=view_num, stride_size=cfg.MODEL.STRIDE_SIZE, drop_path_rate=cfg.MODEL.DROP_PATH)
 
-        if pretrain_choice == 'imagenet':
+        if pretrain_choice == 'imagenet' and model_path:
             self.base.load_param(model_path)
             print('Loading pretrained ImageNet model......from {}'.format(model_path))
 
@@ -372,9 +381,17 @@ class build_transformer_local(nn.Module):
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)
-        for i in param_dict:
-            self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
-        print('Loading pretrained model from {}'.format(trained_path))
+        
+        # Check if this is a LoRA adapter-only checkpoint
+        if 'adapters' in param_dict:
+            from reid.peft.lora import load_lora_state_dict
+            load_lora_state_dict(self, param_dict['adapters'], strict=False)
+            print(f'Loaded LoRA adapters from {trained_path}')
+        else:
+            # Standard full model checkpoint
+            for i in param_dict:
+                self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
+            print('Loading pretrained model from {}'.format(trained_path))
 
     def load_param_finetune(self, model_path):
         param_dict = torch.load(model_path)
@@ -401,4 +418,29 @@ def make_model(cfg, num_class, camera_num, view_num):
     else:
         model = Backbone(num_class, cfg)
         print('===========building ResNet===========')
+    
+    # LoRA injection for transformer models
+    if cfg.LORA.ENABLED and cfg.MODEL.NAME == 'transformer':
+        print('===========Injecting LoRA adapters===========')
+        replaced = inject_lora_into_vit(
+            model.base,  # Apply to the backbone (TransReID instance)
+            r=cfg.LORA.R,
+            alpha=cfg.LORA.ALPHA,
+            dropout=cfg.LORA.DROPOUT,
+            targets=cfg.LORA.TARGETS,
+            bias_mode=cfg.LORA.BIAS
+        )
+        print(f'LoRA applied to {len(replaced)} layers: {replaced[:3]}...' if len(replaced) > 3 else f'LoRA applied to {len(replaced)} layers: {replaced}')
+        
+        mark_trainable_lora_and_head(model, train_head=cfg.LORA.TRAIN_HEAD)
+        
+        # Count trainable parameters
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f'Trainable params: {trainable_params:,} / Total params: {total_params:,} ({100 * trainable_params / total_params:.2f}%)')
+        
+        maybe_merge_lora(model.base, enabled=True, merge_at_eval=cfg.LORA.MERGE_AT_EVAL)
+        if cfg.LORA.MERGE_AT_EVAL:
+            print('LoRA will merge into base weights at eval time')
+    
     return model

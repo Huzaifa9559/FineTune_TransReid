@@ -1,67 +1,116 @@
+# loss/center_loss.py
 from __future__ import absolute_import
 
 import torch
 from torch import nn
 
 
-class CenterLoss(nn.Module):
-    """Center loss.
+def _pick_device(requested: str | None = None, use_gpu: bool | None = None) -> torch.device:
+    """
+    Choose a device in this priority:
+    1) explicit requested ('cuda' | 'mps' | 'cpu')
+    2) if use_gpu is True -> cuda if available, else mps if available, else cpu
+    3) fallback: cuda if available, else mps if available, else cpu
+    """
+    if requested is not None:
+        requested = requested.lower()
+        if requested == "cuda" and torch.cuda.is_available():
+            return torch.device("cuda")
+        if requested == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        if requested == "cpu":
+            return torch.device("cpu")
+        # if the requested isn't available, fall through to auto-pick
 
-    Reference:
-    Wen et al. A Discriminative Feature Learning Approach for Deep Face Recognition. ECCV 2016.
+    if use_gpu:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+class CenterLoss(nn.Module):
+    """
+    Center loss (Wen et al., ECCV 2016).
 
     Args:
         num_classes (int): number of classes.
         feat_dim (int): feature dimension.
+        use_gpu (bool): kept for backward-compat; prefer passing `device`.
+        device (str | torch.device | None): 'cuda' | 'mps' | 'cpu' or a torch.device.
     """
+    def __init__(self, num_classes: int = 751, feat_dim: int = 2048, use_gpu: bool = True, device=None):
+        super().__init__()
+        self.num_classes = int(num_classes)
+        self.feat_dim = int(feat_dim)
 
-    def __init__(self, num_classes=751, feat_dim=2048, use_gpu=True):
-        super(CenterLoss, self).__init__()
-        self.num_classes = num_classes
-        self.feat_dim = feat_dim
-        self.use_gpu = use_gpu
-
-        if self.use_gpu:
-            self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim).cuda())
+        if isinstance(device, torch.device):
+            self.device = device
         else:
-            self.centers = nn.Parameter(torch.randn(self.num_classes, self.feat_dim))
+            self.device = _pick_device(str(device).lower() if isinstance(device, str) else None, use_gpu)
 
-    def forward(self, x, labels):
+        # Allocate centers on the selected device (NO direct .cuda() calls)
+        self.centers = nn.Parameter(
+            torch.randn(self.num_classes, self.feat_dim, device=self.device)
+        )
+
+    def forward(self, x: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: feature matrix with shape (batch_size, feat_dim).
-            labels: ground truth labels with shape (num_classes).
+            x: features, shape (batch_size, feat_dim)
+            labels: ground-truth labels, shape (batch_size,) dtype long
         """
-        assert x.size(0) == labels.size(0), "features.size(0) is not equal to labels.size(0)"
+        if x.dim() != 2 or x.size(1) != self.feat_dim:
+            raise ValueError(f"Expected x of shape (B, {self.feat_dim}), got {tuple(x.shape)}")
+
+        if labels.dim() != 1 or labels.size(0) != x.size(0):
+            raise ValueError(f"Expected labels of shape (B,), got {tuple(labels.shape)}")
+
+        # Ensure x/labels live on the same device as centers
+        if x.device != self.centers.device:
+            x = x.to(self.centers.device)
+        if labels.device != self.centers.device:
+            labels = labels.to(self.centers.device)
 
         batch_size = x.size(0)
-        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
-                  torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
-        distmat.addmm_(1, -2, x, self.centers.t())
 
-        classes = torch.arange(self.num_classes).long()
-        if self.use_gpu: classes = classes.cuda()
-        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
-        mask = labels.eq(classes.expand(batch_size, self.num_classes))
+        # Compute squared Euclidean distance between features and class centers
+        # distmat[i, j] = ||x_i - c_j||^2
+        x_sq = torch.pow(x, 2).sum(dim=1, keepdim=True)                    # (B, 1)
+        c_sq = torch.pow(self.centers, 2).sum(dim=1, keepdim=True).t()     # (1, C)
+        distmat = x_sq + c_sq                                              # (B, C)
+        distmat.addmm_(x, self.centers.t(), beta=1.0, alpha=-2.0)          # distmat += -2 * x @ centers^T
 
-        dist = []
-        for i in range(batch_size):
-            value = distmat[i][mask[i]]
-            value = value.clamp(min=1e-12, max=1e+12)  # for numerical stability
-            dist.append(value)
-        dist = torch.cat(dist)
+        # Build mask for the ground-truth class of each sample
+        classes = torch.arange(self.num_classes, device=self.centers.device, dtype=torch.long)  # (C,)
+        labels = labels.long().unsqueeze(1).expand(batch_size, self.num_classes)                # (B, C)
+        mask = labels.eq(classes.expand(batch_size, self.num_classes))                          # (B, C) bool
+
+        # Gather distances of each sample to its corresponding class center
+        # (equivalent to distmat[range(B), labels_orig])
+        dist = distmat[mask]                                                                     # (B,)
+        dist = dist.clamp(min=1e-12, max=1e12)                                                   # numerical stability
         loss = dist.mean()
         return loss
 
 
-if __name__ == '__main__':
-    use_gpu = False
-    center_loss = CenterLoss(use_gpu=use_gpu)
-    features = torch.rand(16, 2048)
-    targets = torch.Tensor([0, 1, 2, 3, 2, 3, 1, 4, 5, 3, 2, 1, 0, 0, 5, 4]).long()
-    if use_gpu:
-        features = torch.rand(16, 2048).cuda()
-        targets = torch.Tensor([0, 1, 2, 3, 2, 3, 1, 4, 5, 3, 2, 1, 0, 0, 5, 4]).cuda()
+if __name__ == "__main__":
+    # Minimal self-test across available devices
+    tgt_device = None  # set to 'cuda' | 'mps' | 'cpu' to force, or leave None to auto-pick
+    dev = _pick_device(tgt_device)
 
-    loss = center_loss(features, targets)
-    print(loss)
+    B, D, C = 16, 2048, 6
+    center_loss = CenterLoss(num_classes=C, feat_dim=D, device=dev)
+
+    x = torch.rand(B, D, device=dev)
+    y = torch.randint(low=0, high=C, size=(B,), device=dev)
+
+    loss = center_loss(x, y)
+    print("device:", dev)
+    print("loss:", loss.item())

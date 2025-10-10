@@ -69,6 +69,29 @@ _C.MODEL.SIE_CAMERA = False
 _C.MODEL.SIE_VIEW = False
 
 # -----------------------------------------------------------------------------
+# LORA
+# -----------------------------------------------------------------------------
+_C.LORA = CN()
+# Enable/disable LoRA training
+_C.LORA.ENABLED = False
+# Rank of the low-rank decomposition
+_C.LORA.R = 8
+# Alpha parameter for LoRA scaling
+_C.LORA.ALPHA = 16
+# Dropout probability for LoRA layers
+_C.LORA.DROPOUT = 0.0
+# Target modules to apply LoRA (list of strings)
+_C.LORA.TARGETS = ["qkv", "proj", "fc1", "fc2"]
+# Whether to train the classification head when using LoRA
+_C.LORA.TRAIN_HEAD = True
+# Whether to merge LoRA weights into base model during evaluation
+_C.LORA.MERGE_AT_EVAL = False
+# Bias handling: "none", "all", or "lora_only"
+_C.LORA.BIAS = "none"
+# Save only LoRA adapter weights (not full model)
+_C.LORA.SAVE_ADAPTER_ONLY = True
+
+# -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------
 _C.INPUT = CN()
