@@ -428,7 +428,8 @@ def make_model(cfg, num_class, camera_num, view_num):
             alpha=cfg.LORA.ALPHA,
             dropout=cfg.LORA.DROPOUT,
             targets=cfg.LORA.TARGETS,
-            bias_mode=cfg.LORA.BIAS
+            bias_mode=cfg.LORA.BIAS,
+            #include_blocks=list(range(6, 12)),
         )
         print(f'LoRA applied to {len(replaced)} layers: {replaced[:3]}...' if len(replaced) > 3 else f'LoRA applied to {len(replaced)} layers: {replaced}')
         

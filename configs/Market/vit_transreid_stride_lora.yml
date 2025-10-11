@@ -55,6 +55,7 @@ LORA:
   MERGE_AT_EVAL: False
   BIAS: "none"
   SAVE_ADAPTER_ONLY: True
+  #BLOCKS: [6,7,8,9,10,11] 
 
 TEST:
   EVAL: True

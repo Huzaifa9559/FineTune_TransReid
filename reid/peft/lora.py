@@ -133,6 +133,7 @@ def inject_lora_into_vit(
     dropout: float,
     targets: List[str],
     bias_mode: str = "none",
+    #include_blocks=list(range(6, 12)),
 ):
     """
     Wrap matching nn.Linear modules with LoRALinear and return list of replaced names.
