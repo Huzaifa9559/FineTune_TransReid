@@ -1,6 +1,6 @@
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: '/Users/huzaifanaseer/.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth'
+  PRETRAIN_PATH: '.cache/torch/checkpoints/jx_vit_base_p16_224-80ecf9dd.pth'
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
   IF_WITH_CENTER: 'no'
@@ -24,7 +24,7 @@ INPUT:
 
 DATASETS:
   NAMES: ('market1501')
-  ROOT_DIR: ('../../data')
+  ROOT_DIR: 'C:/Users/22K-4310/Desktop/FYP material/New folder/FineTune_TransReid/data'
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
